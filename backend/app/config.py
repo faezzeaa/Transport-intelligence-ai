@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     MAPPLS_CLIENT_SECRET: str = ""
     MAPPLS_REST_KEY: str = ""
 
+    # TomTom Geospatial & Real-Time Traffic Integration
+    TOMTOM_API_KEY: str = ""
+
     model_config = SettingsConfigDict(
         env_file=tuple(_env_files),
         env_file_encoding="utf-8",
@@ -64,4 +67,3 @@ class Settings(BaseSettings):
 @lru_cache()
 def get_settings() -> Settings:
     return Settings()
-

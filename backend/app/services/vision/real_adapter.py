@@ -391,7 +391,6 @@ class RealVisionAdapter(BaseVisionService):
             "-v", "error",
             "-i", video_path,
             "-vf", f"fps={fps}",
-            "-vsync", "vfr",
             output_pattern,
         ]
         try:

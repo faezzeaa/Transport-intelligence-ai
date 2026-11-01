@@ -147,7 +147,85 @@ class MapplsService:
             self._last_auth_check_time = now
             return res
 
-        # If configured, test token retrieval
+        # If REST key is provided without OAuth client credentials
+        if not (self.client_id and self.client_secret) and self.rest_key:
+            test_url = f"https://apis.mappls.com/advancedmaps/v1/{self.rest_key}/still_image?center=8.0883,77.5385&zoom=12&size=100x100"
+            req = urllib.request.Request(test_url, headers={"User-Agent": "IntelligentTransportAI/2.0"})
+            try:
+                with urllib.request.urlopen(req, timeout=6) as response:
+                    if response.status == 200:
+                        res = {
+                            "provider": "Mappls (MapmyIndia)",
+                            "status": "OPERATIONAL",
+                            "is_configured": True,
+                            "is_operational": True,
+                            "client_id_present": False,
+                            "client_secret_present": False,
+                            "rest_key_present": True,
+                            "masked_client_id": mask_secret(self.rest_key),
+                            "http_status_code": 200,
+                            "diagnostic_message": "Mappls Static / REST key verified and operational.",
+                            "entitled_capabilities": ["india_basemaps", "web_sdk_styles"],
+                            "fallback_active": False,
+                            "fallback_provider": "Esri World Dark Gray Canvas (Available on demand)",
+                            "attribution": "© MapmyIndia / Mappls • © OpenStreetMap contributors",
+                        }
+                    else:
+                        res = {
+                            "provider": "Mappls (MapmyIndia)",
+                            "status": "AUTH_FAILED",
+                            "is_configured": True,
+                            "is_operational": False,
+                            "client_id_present": False,
+                            "client_secret_present": False,
+                            "rest_key_present": True,
+                            "masked_client_id": mask_secret(self.rest_key),
+                            "http_status_code": response.status,
+                            "diagnostic_message": f"Mappls API rejected Static Key (HTTP {response.status}).",
+                            "entitled_capabilities": [],
+                            "fallback_active": True,
+                            "fallback_provider": "Esri World Dark Gray Canvas (Active Fallback)",
+                            "attribution": "© MapmyIndia / Mappls • © Esri • © OpenStreetMap contributors",
+                        }
+            except urllib.error.HTTPError as http_err:
+                res = {
+                    "provider": "Mappls (MapmyIndia)",
+                    "status": "AUTH_FAILED" if http_err.code in (401, 403, 412) else "SERVICE_UNAVAILABLE",
+                    "is_configured": True,
+                    "is_operational": False,
+                    "client_id_present": False,
+                    "client_secret_present": False,
+                    "rest_key_present": True,
+                    "masked_client_id": mask_secret(self.rest_key),
+                    "http_status_code": http_err.code,
+                    "diagnostic_message": f"Mappls API rejected Static Key with HTTP {http_err.code} (Client credentials expired/invalid). Fallback basemap is active.",
+                    "entitled_capabilities": [],
+                    "fallback_active": True,
+                    "fallback_provider": "Esri World Dark Gray Canvas (Active Fallback)",
+                    "attribution": "© MapmyIndia / Mappls • © Esri • © OpenStreetMap contributors",
+                }
+            except Exception as exc:
+                res = {
+                    "provider": "Mappls (MapmyIndia)",
+                    "status": "SERVICE_UNAVAILABLE",
+                    "is_configured": True,
+                    "is_operational": False,
+                    "client_id_present": False,
+                    "client_secret_present": False,
+                    "rest_key_present": True,
+                    "masked_client_id": mask_secret(self.rest_key),
+                    "http_status_code": None,
+                    "diagnostic_message": f"Mappls connection probe failed: {str(exc)}",
+                    "entitled_capabilities": [],
+                    "fallback_active": True,
+                    "fallback_provider": "Esri World Dark Gray Canvas (Active Fallback)",
+                    "attribution": "© MapmyIndia / Mappls • © Esri • © OpenStreetMap contributors",
+                }
+            self._last_status = res
+            self._last_auth_check_time = now
+            return res
+
+        # If OAuth configured, test token retrieval
         token, err_msg, http_code = self.get_token()
 
         if token:

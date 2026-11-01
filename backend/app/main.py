@@ -15,6 +15,7 @@ from app.api import (
     statistics_router,
     vision_router,
     mappls_router,
+    tomtom_router,
 )
 
 settings = get_settings()
@@ -25,43 +26,46 @@ async def lifespan(app: FastAPI):
     # Startup: ensure upload directory exists
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     
-    # Create SQLite tables
-    Base.metadata.create_all(bind=engine)
-    
-    # Safe backward-compatible SQLite column migration
-    if engine.dialect.name == "sqlite":
-        try:
-            with engine.connect() as conn:
-                from sqlalchemy import text
-                existing_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(vision_analyses)")).fetchall()]
-                new_columns = [
-                    ("frame_timestamp_sec", "FLOAT"),
-                    ("source_video_name", "VARCHAR(255)"),
-                    ("session_id", "VARCHAR(36)"),
-                    ("video_hash", "VARCHAR(64)"),
-                    ("unique_vehicles_tracked", "INTEGER DEFAULT 0"),
-                    ("total_frame_detections", "INTEGER DEFAULT 0"),
-                    ("tracking_summary_json", "TEXT DEFAULT '{}'"),
-                    ("time_buckets_json", "TEXT DEFAULT '[]'"),
-                    ("events_json", "TEXT DEFAULT '[]'"),
-                    ("evaluation_summary_json", "TEXT"),
-                    ("fps_processed", "FLOAT DEFAULT 0.0"),
-                    ("inference_config_json", "TEXT DEFAULT '{}'"),
-                ]
-                for col_name, col_type in new_columns:
-                    if col_name not in existing_cols:
-                        conn.execute(text(f"ALTER TABLE vision_analyses ADD COLUMN {col_name} {col_type}"))
-                conn.commit()
-        except Exception as mig_err:
-            print(f"[Transport AI] Notice on column migration: {mig_err}")
-
-    # Auto-seed simulated demo incidents if empty
-    db = SessionLocal()
+    # Create database tables and seed if database connection is available
     try:
-        count = seed_database(db)
-        print(f"[Transport AI] Database initialized with {count} records.")
-    finally:
-        db.close()
+        Base.metadata.create_all(bind=engine)
+        
+        # Safe backward-compatible SQLite column migration
+        if engine.dialect.name == "sqlite":
+            try:
+                with engine.connect() as conn:
+                    from sqlalchemy import text
+                    existing_cols = [r[1] for r in conn.execute(text("PRAGMA table_info(vision_analyses)")).fetchall()]
+                    new_columns = [
+                        ("frame_timestamp_sec", "FLOAT"),
+                        ("source_video_name", "VARCHAR(255)"),
+                        ("session_id", "VARCHAR(36)"),
+                        ("video_hash", "VARCHAR(64)"),
+                        ("unique_vehicles_tracked", "INTEGER DEFAULT 0"),
+                        ("total_frame_detections", "INTEGER DEFAULT 0"),
+                        ("tracking_summary_json", "TEXT DEFAULT '{}'"),
+                        ("time_buckets_json", "TEXT DEFAULT '[]'"),
+                        ("events_json", "TEXT DEFAULT '[]'"),
+                        ("evaluation_summary_json", "TEXT"),
+                        ("fps_processed", "FLOAT DEFAULT 0.0"),
+                        ("inference_config_json", "TEXT DEFAULT '{}'"),
+                    ]
+                    for col_name, col_type in new_columns:
+                        if col_name not in existing_cols:
+                            conn.execute(text(f"ALTER TABLE vision_analyses ADD COLUMN {col_name} {col_type}"))
+                    conn.commit()
+            except Exception as mig_err:
+                print(f"[Transport AI] Notice on column migration: {mig_err}")
+
+        # Auto-seed simulated demo incidents if empty
+        db = SessionLocal()
+        try:
+            count = seed_database(db)
+            print(f"[Transport AI] Database initialized with {count} records.")
+        finally:
+            db.close()
+    except Exception as db_init_err:
+        print(f"[Transport AI] Database connectivity note on startup: {db_init_err}")
 
     yield
     # Shutdown logic if any
@@ -128,6 +132,7 @@ app.include_router(incidents_router, prefix=settings.API_V1_PREFIX)
 app.include_router(statistics_router, prefix=settings.API_V1_PREFIX)
 app.include_router(vision_router, prefix=settings.API_V1_PREFIX)
 app.include_router(mappls_router, prefix=settings.API_V1_PREFIX)
+app.include_router(tomtom_router, prefix=settings.API_V1_PREFIX)
 
 
 @app.get("/")

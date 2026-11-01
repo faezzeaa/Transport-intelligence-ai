@@ -390,3 +390,121 @@ export type AppModule =
   | 'accessibility'
   | 'settings';
 
+
+export interface TomTomStatus {
+  provider: string;
+  status: string;
+  is_configured: boolean;
+  is_operational: boolean;
+  masked_api_key: string;
+  capabilities: string[];
+  diagnostic_message: string;
+  attribution: string;
+}
+
+export interface TomTomFlowData {
+  current_speed: number;
+  free_flow_speed: number;
+  congestion_pct: number;
+  current_travel_time_sec: number;
+  free_flow_travel_time_sec: number;
+  confidence: number;
+  road_closure: boolean;
+  frc: string;
+  coordinates?: [number, number][];
+}
+
+export interface TomTomFlowResponse {
+  success: boolean;
+  provider: string;
+  latitude: number;
+  longitude: number;
+  unit: string;
+  flow: TomTomFlowData;
+  attribution: string;
+}
+
+export interface TomTomIncidentItem {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  severity: string;
+  latitude: number;
+  longitude: number;
+  location_name: string;
+  delay_seconds: number;
+  magnitude_of_delay: number;
+  length_meters: number;
+  geometry: any;
+  start_time?: string;
+  end_time?: string;
+  is_simulated: boolean;
+  data_source: string;
+}
+
+export interface TomTomIncidentsResponse {
+  success: boolean;
+  provider: string;
+  bbox: [number, number, number, number];
+  incidents_count: number;
+  incidents: TomTomIncidentItem[];
+  attribution: string;
+}
+
+export interface LocationPreset {
+  id: string;
+  name: string;
+  state: 'Tamil Nadu' | 'Karnataka' | string;
+  lat: number;
+  lng: number;
+  zoom: number;
+  description: string;
+  badge?: string;
+}
+
+export interface SlowSegmentItem {
+  id: string;
+  road: string;
+  delay_seconds: number;
+  delay_minutes: number;
+  severity: string;
+  category: string;
+  description: string;
+  latitude: number;
+  longitude: number;
+}
+
+export interface TomTomAnalyticsData {
+  success: boolean;
+  provider: string;
+  location_name: string;
+  center: [number, number];
+  bbox: [number, number, number, number];
+  is_clamped?: boolean;
+  timestamp: string;
+  coverage_status: 'VERIFIED_LIVE' | 'LOW_DENSITY_ROAD' | 'NOT_CONFIGURED';
+  metrics: {
+    congestion_pct: number;
+    congestion_level: 'OPTIMAL_FLOW' | 'MODERATE' | 'HEAVY' | 'SEVERE';
+    congestion_label: string;
+    congestion_color: 'emerald' | 'sky' | 'amber' | 'rose';
+    current_speed_kmh: number | null;
+    free_flow_speed_kmh: number | null;
+    speed_ratio_pct: number | null;
+    total_delay_seconds: number;
+    total_delay_minutes: number;
+    total_incidents: number;
+    incident_breakdown: {
+      accidents: number;
+      congestion_jams: number;
+      roadworks: number;
+      road_closures: number;
+      hazards: number;
+    };
+    confidence: number;
+  };
+  slow_segments: SlowSegmentItem[];
+  attribution: string;
+}
+

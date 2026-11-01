@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   AlertTriangle,
   Flame,
@@ -10,11 +10,14 @@ import {
   Clock,
   ShieldCheck,
   Compass,
+  Zap,
 } from 'lucide-react';
-import { Incident, IncidentStatistics } from '../types';
+import { Incident, IncidentStatistics, TomTomStatus, TomTomFlowData, LocationPreset, TomTomAnalyticsData } from '../types';
 import { StatCard } from '../components/common/StatCard';
 import { TransportMap } from '../components/map/TransportMap';
 import { IncidentFeed } from '../components/incidents/IncidentFeed';
+import { LiveTrafficAnalyticsPanel, LOCATION_PRESETS } from '../components/traffic/LiveTrafficAnalyticsPanel';
+import { api } from '../services/api';
 
 interface OverviewPageProps {
   incidents: Incident[];
@@ -38,6 +41,70 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
   const avgCongestion = statistics?.average_congestion_pct ?? 54.2;
   const monitoredCorridors = statistics?.monitored_corridors_count ?? 8;
 
+  // TomTom live traffic & analytics state
+  const [tomtomStatus, setTomtomStatus] = useState<TomTomStatus | null>(null);
+  const [liveFlow, setLiveFlow] = useState<TomTomFlowData | null>(null);
+  const [selectedLocation, setSelectedLocation] = useState<LocationPreset>(() => {
+    if (typeof window !== 'undefined') {
+      const param = new URLSearchParams(window.location.search).get('location')?.toLowerCase();
+      if (param) {
+        const found = LOCATION_PRESETS.find((p) => p.id === param || p.name.toLowerCase() === param);
+        if (found) return found;
+      }
+    }
+    return LOCATION_PRESETS[0];
+  });
+  const [analyticsData, setAnalyticsData] = useState<TomTomAnalyticsData | null>(null);
+  const [isAnalyticsLoading, setIsAnalyticsLoading] = useState<boolean>(false);
+  const [targetFlyTo, setTargetFlyTo] = useState<{ lat: number; lng: number; zoom?: number } | null>(null);
+
+  const fetchAnalytics = useCallback(async (loc: LocationPreset, bbox?: [number, number, number, number]) => {
+    setIsAnalyticsLoading(true);
+    try {
+      const params: any = {
+        lat: loc.lat,
+        lng: loc.lng,
+        location_name: `${loc.name}, ${loc.state}`,
+      };
+      if (bbox && bbox.length === 4) {
+        params.min_lon = bbox[0];
+        params.min_lat = bbox[1];
+        params.max_lon = bbox[2];
+        params.max_lat = bbox[3];
+      }
+      const data = await api.getTomTomAnalytics(params);
+      setAnalyticsData(data);
+      if (data.metrics && data.metrics.current_speed_kmh !== null) {
+        setLiveFlow({
+          current_speed: data.metrics.current_speed_kmh,
+          free_flow_speed: data.metrics.free_flow_speed_kmh || data.metrics.current_speed_kmh,
+          congestion_pct: data.metrics.congestion_pct,
+          current_travel_time_sec: data.metrics.total_delay_seconds,
+          free_flow_travel_time_sec: 0,
+          confidence: data.metrics.confidence,
+          road_closure: data.metrics.incident_breakdown.road_closures > 0,
+          frc: 'LIVE',
+          coordinates: [],
+        });
+      }
+    } catch (err) {
+      console.warn('[OverviewPage] Failed to fetch TomTom analytics:', err);
+    } finally {
+      setIsAnalyticsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    api.getTomTomStatus()
+      .then((status) => {
+        setTomtomStatus(status);
+        if (status.is_configured) {
+          fetchAnalytics(selectedLocation);
+        }
+      })
+      .catch((err) => console.warn('[OverviewPage] TomTom status error:', err));
+  }, [fetchAnalytics]);
+
   return (
     <div className="space-y-5">
       {/* Operational Provenance & Verification Notice */}
@@ -48,7 +115,13 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
             Operational Intelligence Platform: Verified telemetry synced from SQLite persistence.
           </span>
         </div>
-        <div className="flex items-center gap-2 text-[11px] font-mono">
+        <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
+          {tomtomStatus?.is_configured && (
+            <span className="rounded bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800/40 px-2 py-0.5 flex items-center gap-1 font-semibold">
+              <Zap className="h-3 w-3 text-amber-500 fill-amber-500" />
+              TomTom Live Traffic: Connected {liveFlow ? `(${liveFlow.current_speed} km/h • ${liveFlow.congestion_pct}% delay)` : ''}
+            </span>
+          )}
           <span className="rounded bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/40 px-2 py-0.5">
             Sample incidents: SIMULATED DEMO DATA
           </span>
@@ -100,31 +173,69 @@ export const OverviewPage: React.FC<OverviewPageProps> = ({
           icon={<Layers className="h-5 w-5" />}
         />
       </div>
-
-      {/* Main Grid: Interactive Map + Synchronized Live Incident Feed */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="lg:col-span-2 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-wide font-mono uppercase">
-                Geographic Traffic Operations Map
-              </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                Spatial telemetry • Mappls Geocoding & Routing • Fallback Basemap Architecture
-              </p>
-            </div>
-            <span className="rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120] px-2.5 py-1 text-[11px] font-mono text-slate-600 dark:text-slate-400 shadow-xs">
-              Grid: SF Metro / Dynamic Coordinates
-            </span>
-          </div>
-
-          <TransportMap
-            incidents={incidents}
-            selectedIncident={selectedIncident}
-            onSelectIncident={onSelectIncident}
-            onUpdateStatus={onUpdateStatus}
-            isLoading={isLoading}
-          />
+ 
+       {/* Live TomTom Traffic Intelligence & Quick Geographic Exploration */}
+       {tomtomStatus?.is_configured && (
+         <LiveTrafficAnalyticsPanel
+           analytics={analyticsData}
+           isLoading={isAnalyticsLoading}
+           onRefresh={() => fetchAnalytics(selectedLocation)}
+           onSelectPreset={(preset) => {
+             setSelectedLocation(preset);
+             setTargetFlyTo({ lat: preset.lat, lng: preset.lng, zoom: preset.zoom });
+             fetchAnalytics(preset);
+           }}
+           activePresetId={selectedLocation.id}
+           onSelectSlowSegment={(seg) => {
+             setTargetFlyTo({ lat: seg.lat, lng: seg.lng, zoom: 15.0 });
+           }}
+         />
+       )}
+ 
+       {/* Main Grid: Interactive Map + Synchronized Live Incident Feed */}
+       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+         <div className="lg:col-span-2 space-y-3">
+           <div className="flex flex-wrap items-center justify-between gap-2">
+             <div>
+               <h2 className="text-sm font-bold text-slate-900 dark:text-white tracking-wide font-mono uppercase">
+                 Geographic Traffic Operations Map
+               </h2>
+               <p className="text-xs text-slate-500 dark:text-slate-400">
+                 Spatial telemetry • Mappls Geocoding & Routing • Fallback Basemap Architecture
+               </p>
+             </div>
+             <span className="rounded-md border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120] px-2.5 py-1 text-[11px] font-mono text-slate-600 dark:text-slate-400 shadow-xs">
+               Selected: {selectedLocation.name}, {selectedLocation.state} ({selectedLocation.lat.toFixed(4)}, {selectedLocation.lng.toFixed(4)})
+             </span>
+           </div>
+ 
+           <TransportMap
+             incidents={incidents}
+             selectedIncident={selectedIncident}
+             onSelectIncident={onSelectIncident}
+             onUpdateStatus={onUpdateStatus}
+             isLoading={isLoading}
+             activeLocation={selectedLocation}
+             targetFlyTo={targetFlyTo}
+             onLocationChange={(loc) => {
+               setSelectedLocation(loc);
+               fetchAnalytics(loc);
+             }}
+             onViewportChange={(vp) => {
+               fetchAnalytics(
+                 {
+                   id: 'viewport',
+                   name: `${vp.center[1].toFixed(2)}°N, ${vp.center[0].toFixed(2)}°E`,
+                   state: 'Visible Area',
+                   lat: vp.center[1],
+                   lng: vp.center[0],
+                   zoom: vp.zoom,
+                   description: 'Visible Viewport',
+                 },
+                 vp.bbox
+               );
+             }}
+           />
         </div>
 
         <div className="h-[620px]">

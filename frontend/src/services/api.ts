@@ -380,5 +380,66 @@ export const api = {
     }
     return res.json();
   },
-};
+  async getTomTomStatus(): Promise<import('../types').TomTomStatus> {
+    const res = await fetch(`${API_BASE}/tomtom/status`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch TomTom status: ${res.statusText}`);
+    }
+    return res.json();
+  },
 
+  async getTomTomFlow(lat: number, lng: number, unit: string = 'KMPH'): Promise<import('../types').TomTomFlowResponse> {
+    const res = await fetch(`${API_BASE}/tomtom/flow?lat=${lat}&lng=${lng}&unit=${unit}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || 'Failed to fetch TomTom traffic flow');
+    }
+    return res.json();
+  },
+
+  async getTomTomIncidents(bbox?: [number, number, number, number]): Promise<import('../types').TomTomIncidentsResponse> {
+    let url = `${API_BASE}/tomtom/incidents`;
+    if (bbox && bbox.length === 4) {
+      url += `?min_lon=${bbox[0]}&min_lat=${bbox[1]}&max_lon=${bbox[2]}&max_lat=${bbox[3]}`;
+    }
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || 'Failed to fetch TomTom incidents');
+    }
+    return res.json();
+  },
+
+  async getTomTomAnalytics(params: {
+    lat: number;
+    lng: number;
+    min_lon?: number;
+    min_lat?: number;
+    max_lon?: number;
+    max_lat?: number;
+    location_name?: string;
+  }): Promise<import('../types').TomTomAnalyticsData> {
+    const q = new URLSearchParams();
+    q.append('lat', params.lat.toString());
+    q.append('lng', params.lng.toString());
+    if (params.min_lon !== undefined) q.append('min_lon', params.min_lon.toString());
+    if (params.min_lat !== undefined) q.append('min_lat', params.min_lat.toString());
+    if (params.max_lon !== undefined) q.append('max_lon', params.max_lon.toString());
+    if (params.max_lat !== undefined) q.append('max_lat', params.max_lat.toString());
+    if (params.location_name) q.append('location_name', params.location_name);
+    const res = await fetch(`${API_BASE}/tomtom/analytics?${q.toString()}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || 'Failed to fetch TomTom traffic analytics');
+    }
+    return res.json();
+  },
+
+  getTomTomFlowTileUrl(): string {
+    return `${API_BASE}/tomtom/tiles/flow/{z}/{x}/{y}.png`;
+  },
+
+  getTomTomIncidentTileUrl(): string {
+    return `${API_BASE}/tomtom/tiles/incidents/{z}/{x}/{y}.png`;
+  },
+};

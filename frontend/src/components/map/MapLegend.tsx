@@ -23,6 +23,12 @@ export const MapLegend: React.FC = () => {
           <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 border border-emerald-200" />
           <span className="text-slate-300">Low Severity / Monitored Flow</span>
         </div>
+        <div className="flex items-center gap-2">
+          <span className="h-2.5 w-2.5 rounded-full bg-amber-500 border border-amber-300 font-mono text-[7px] text-white flex items-center justify-center font-bold">
+            TT
+          </span>
+          <span className="text-slate-300">TomTom Live Incident</span>
+        </div>
       </div>
       <div className="mt-2 pt-2 border-t border-slate-800 text-[10px] text-slate-400">
         Click marker to inspect corridor telemetry

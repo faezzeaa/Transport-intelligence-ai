@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import * as maplibregl from 'maplibre-gl';
 import {
   RotateCcw,
+  RotateCw,
   Layers,
   Flame,
   AlertTriangle,
@@ -13,13 +14,15 @@ import {
   Search,
   Navigation,
   X,
-  ExternalLink,
-  ShieldAlert,
+  MapPin,
+  Zap,
 } from 'lucide-react';
-import { Incident, IncidentSeverity, MapplsStatus } from '../../types';
+import { Incident, IncidentSeverity, MapplsStatus, TomTomStatus, TomTomIncidentItem, LocationPreset } from '../../types';
 import { MapLegend } from './MapLegend';
 import { IncidentDetailPanel } from './IncidentDetailPanel';
 import { api } from '../../services/api';
+import { loadMapplsSdk } from '../../services/mapplsLoader';
+import { LOCATION_PRESETS } from '../traffic/LiveTrafficAnalyticsPanel';
 
 interface TransportMapProps {
   incidents: Incident[];
@@ -27,14 +30,23 @@ interface TransportMapProps {
   onSelectIncident: (incident: Incident | null) => void;
   onUpdateStatus: (id: string, newStatus: any) => Promise<void>;
   isLoading?: boolean;
+  initialCenter?: [number, number];
+  initialZoom?: number;
+  activeLocation?: LocationPreset;
+  onLocationChange?: (location: LocationPreset) => void;
+  onViewportChange?: (viewport: { center: [number, number]; bbox: [number, number, number, number]; zoom: number }) => void;
+  targetFlyTo?: { lat: number; lng: number; zoom?: number } | null;
 }
 
 export type BasemapProvider = 'mappls' | 'light-canvas' | 'dark-canvas' | 'openfreemap' | 'osm' | 'carto';
 
-const DEFAULT_CENTER: [number, number] = [-122.4194, 37.7749];
-const DEFAULT_ZOOM = 12.2;
+// Default to Chennai (Tamil Nadu Capital) or configured coordinates
+const DEFAULT_LAT = parseFloat(import.meta.env.VITE_MAP_DEFAULT_LAT || '13.0827');
+const DEFAULT_LNG = parseFloat(import.meta.env.VITE_MAP_DEFAULT_LNG || '80.2707');
+const DEFAULT_ZOOM = parseFloat(import.meta.env.VITE_MAP_DEFAULT_ZOOM || '12.0');
+const DEFAULT_CENTER: [number, number] = [DEFAULT_LNG, DEFAULT_LAT];
 
-// 1. Esri World Light Gray Canvas (100% Keyless, zero watermark, clean light theme)
+// 1. Esri World Light Gray Canvas (100% Keyless, clean light theme)
 const ESRI_LIGHT_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   name: 'Esri World Light Gray Canvas',
@@ -84,7 +96,7 @@ const ESRI_LIGHT_STYLE: maplibregl.StyleSpecification = {
   ],
 };
 
-// 1. Esri World Dark Gray Canvas (100% Keyless, zero watermark, clean dark theme)
+// 1. Esri World Dark Gray Canvas (100% Keyless, clean dark theme)
 const ESRI_DARK_STYLE: maplibregl.StyleSpecification = {
   version: 8,
   name: 'Esri World Dark Gray Canvas',
@@ -207,26 +219,80 @@ export const TransportMap: React.FC<TransportMapProps> = ({
   selectedIncident,
   onSelectIncident,
   onUpdateStatus,
+  initialCenter,
+  initialZoom,
+  activeLocation,
+  onLocationChange,
+  onViewportChange,
+  targetFlyTo,
 }) => {
+  // Map container refs
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapplsContainerRef = useRef<HTMLDivElement>(null);
+
+  // Map instance refs
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const mapplsMapRef = useRef<any>(null);
+
+  // Marker refs
   const markersRef = useRef<maplibregl.Marker[]>([]);
+  const mapplsMarkersRef = useRef<any[]>([]);
   const searchMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const tomtomMarkersRef = useRef<maplibregl.Marker[]>([]);
+  const mapplsTomTomMarkersRef = useRef<any[]>([]);
+  const debounceTimerRef = useRef<any>(null);
 
   // Map state
   const [activeSeverityFilter, setActiveSeverityFilter] = useState<string>('ALL');
   const [showCongestionLayer, setShowCongestionLayer] = useState(true);
   const [showCorridorLayer, setShowCorridorLayer] = useState(true);
   const isDarkInitial = typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
-  const [basemap, setBasemap] = useState<BasemapProvider>(isDarkInitial ? 'dark-canvas' : 'light-canvas');
+
+  // Active geographic location state
+  const [currentLocation, setCurrentLocation] = useState<LocationPreset>(() => {
+    if (activeLocation) return activeLocation;
+    if (typeof window !== 'undefined') {
+      const param = new URLSearchParams(window.location.search).get('location')?.toLowerCase();
+      if (param) {
+        const found = LOCATION_PRESETS.find((p) => p.id === param || p.name.toLowerCase() === param);
+        if (found) return found;
+      }
+    }
+    return LOCATION_PRESETS[0]; // Default: Chennai
+  });
+  const [isLocationMenuOpen, setIsLocationMenuOpen] = useState(false);
+
+  // Basemap state
+  const [basemap, setBasemapState] = useState<BasemapProvider>(() => {
+    if (typeof window !== 'undefined') {
+      const urlParam = new URLSearchParams(window.location.search).get('basemap');
+      if (urlParam && ['mappls', 'light-canvas', 'dark-canvas', 'openfreemap', 'osm', 'carto'].includes(urlParam)) {
+        return urlParam as BasemapProvider;
+      }
+      const saved = localStorage.getItem('transport_ai_basemap');
+      if (saved && ['mappls', 'light-canvas', 'dark-canvas', 'openfreemap', 'osm', 'carto'].includes(saved)) {
+        return saved as BasemapProvider;
+      }
+    }
+    return isDarkInitial ? 'dark-canvas' : 'light-canvas';
+  });
+
+  const setBasemap = useCallback((provider: BasemapProvider) => {
+    setBasemapState(provider);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('transport_ai_basemap', provider);
+    }
+  }, []);
+
   const [isBasemapMenuOpen, setIsBasemapMenuOpen] = useState(false);
   const [isStyleLoaded, setIsStyleLoaded] = useState(false);
   const [tileError, setTileError] = useState<string | null>(null);
   const [cursorCoords, setCursorCoords] = useState<{ lat: number; lng: number } | null>(null);
 
   // Mappls integration state
+  const [isMapplsLoading, setIsMapplsLoading] = useState(false);
+  const [mapplsError, setMapplsError] = useState<string | null>(null);
   const [mapplsStatus, setMapplsStatus] = useState<MapplsStatus | null>(null);
-  const [isCheckingMappls, setIsCheckingMappls] = useState(false);
   const [mapplsBannerNotice, setMapplsBannerNotice] = useState<string | null>(null);
 
   // Mappls Place Search state
@@ -236,29 +302,89 @@ export const TransportMap: React.FC<TransportMapProps> = ({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [showSearchResults, setShowSearchResults] = useState(false);
 
-  const cartoApiKey = import.meta.env.VITE_CARTO_API_KEY as string | undefined;
+  // TomTom Live Traffic integration state
+  const [tomtomStatus, setTomtomStatus] = useState<TomTomStatus | null>(null);
+  const [showTomTomTraffic, setShowTomTomTraffic] = useState(true);
+  const [tomtomIncidents, setTomtomIncidents] = useState<TomTomIncidentItem[]>([]);
+  const [isRefreshingTraffic, setIsRefreshingTraffic] = useState(false);
+  const [lastTrafficSyncTime, setLastTrafficSyncTime] = useState<string | null>(null);
+  const [trafficError, setTrafficError] = useState<string | null>(null);
 
-  // Audit Mappls status on mount
+  const cartoApiKey = import.meta.env.VITE_CARTO_API_KEY as string | undefined;
+  const mapplsStaticKey = import.meta.env.VITE_MAPPLS_STATIC_KEY as string | undefined;
+
+  // Sync external activeLocation changes
   useEffect(() => {
-    setIsCheckingMappls(true);
+    if (activeLocation && activeLocation.id !== currentLocation.id) {
+      setCurrentLocation(activeLocation);
+      flyToCoordinates(activeLocation.lat, activeLocation.lng, activeLocation.zoom);
+    }
+  }, [activeLocation]);
+
+  // Handle programmatic targetFlyTo
+  useEffect(() => {
+    if (targetFlyTo) {
+      flyToCoordinates(targetFlyTo.lat, targetFlyTo.lng, targetFlyTo.zoom || 14.5);
+    }
+  }, [targetFlyTo]);
+
+  // Fetch live TomTom incidents for a specific bounding box
+  const fetchTrafficForBbox = useCallback(
+    (bbox: [number, number, number, number], center?: { lat: number; lng: number }) => {
+      if (!tomtomStatus?.is_configured) return;
+      setIsRefreshingTraffic(true);
+      setTrafficError(null);
+
+      api.getTomTomIncidents(bbox)
+        .then((res) => {
+          if (res.success && res.incidents) {
+            setTomtomIncidents(res.incidents);
+            setLastTrafficSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+          }
+        })
+        .catch((err) => {
+          console.warn('[TransportMap] TomTom incidents query failed:', err);
+          setTrafficError('Unable to update live traffic incidents for current view.');
+        })
+        .finally(() => {
+          setIsRefreshingTraffic(false);
+        });
+
+      if (onViewportChange && center) {
+        onViewportChange({
+          center: [center.lng, center.lat],
+          bbox,
+          zoom: mapRef.current?.getZoom() || mapplsMapRef.current?.getZoom() || DEFAULT_ZOOM,
+        });
+      }
+    },
+    [tomtomStatus, onViewportChange]
+  );
+
+  // Audit TomTom and Mappls services on mount
+  useEffect(() => {
+    api.getTomTomStatus()
+      .then((status) => {
+        setTomtomStatus(status);
+        if (status.is_configured) {
+          const cLat = initialCenter ? initialCenter[1] : currentLocation.lat;
+          const cLng = initialCenter ? initialCenter[0] : currentLocation.lng;
+          const initBbox: [number, number, number, number] = [
+            roundCoord(cLng - 0.25),
+            roundCoord(cLat - 0.25),
+            roundCoord(cLng + 0.25),
+            roundCoord(cLat + 0.25),
+          ];
+          fetchTrafficForBbox(initBbox, { lat: cLat, lng: cLng });
+        }
+      })
+      .catch((err) => console.warn('[TransportMap] TomTom status failed:', err));
+
     api.getMapplsStatus()
       .then((status) => {
         setMapplsStatus(status);
-        if (!status.is_operational) {
-          // If Mappls is selected or attempted, notice user of fallback
-          if (status.status === 'AUTH_FAILED') {
-            setMapplsBannerNotice(
-              `Mappls Service Notice: Server credentials rejected with HTTP 401 (Bad client credentials). Fallback basemap (Esri Canvas) is active.`
-            );
-          }
-        }
       })
-      .catch((err) => {
-        console.warn('[TransportMap] Mappls status inquiry failed:', err);
-      })
-      .finally(() => {
-        setIsCheckingMappls(false);
-      });
+      .catch((err) => console.warn('[TransportMap] Mappls status failed:', err));
   }, []);
 
   // Filter incidents according to active severity filter
@@ -267,15 +393,11 @@ export const TransportMap: React.FC<TransportMapProps> = ({
     return incidents.filter((inc) => inc.severity === activeSeverityFilter);
   }, [incidents, activeSeverityFilter]);
 
-  // Resolve style based on selected basemap provider
+  // Resolve style based on selected basemap provider (for MapLibre)
   const getStyleForProvider = useCallback(
     (provider: BasemapProvider): maplibregl.StyleSpecification | string => {
       const isDark = typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
       switch (provider) {
-        case 'mappls':
-          // If Mappls operational and REST key available, use vector/raster style;
-          // otherwise fallback to Esri Canvas with notice
-          return isDark ? ESRI_DARK_STYLE : ESRI_LIGHT_STYLE;
         case 'light-canvas':
           return ESRI_LIGHT_STYLE;
         case 'dark-canvas':
@@ -286,6 +408,7 @@ export const TransportMap: React.FC<TransportMapProps> = ({
           return OSM_STYLE;
         case 'carto':
           return getCartoDarkStyle(cartoApiKey);
+        case 'mappls':
         default:
           return isDark ? ESRI_DARK_STYLE : ESRI_LIGHT_STYLE;
       }
@@ -293,8 +416,102 @@ export const TransportMap: React.FC<TransportMapProps> = ({
     [cartoApiKey]
   );
 
-  // Initialize MapLibre GL map
+  // Helper to fly to coordinates across both MapLibre and Mappls engines
+  const flyToCoordinates = (lat: number, lng: number, zoomLevel: number = 13.0) => {
+    if (basemap === 'mappls' && mapplsMapRef.current) {
+      try {
+        if (typeof mapplsMapRef.current.flyTo === 'function') {
+          mapplsMapRef.current.flyTo({ center: [lng, lat], zoom: zoomLevel, speed: 1.2 });
+        } else if (typeof mapplsMapRef.current.setCenter === 'function') {
+          mapplsMapRef.current.setCenter({ lat, lng });
+          mapplsMapRef.current.setZoom(zoomLevel);
+        }
+      } catch (e) {
+        console.warn('[TransportMap] Mappls flyTo error:', e);
+      }
+    } else if (mapRef.current) {
+      try {
+        mapRef.current.flyTo({ center: [lng, lat], zoom: zoomLevel, pitch: 25, speed: 1.2 });
+      } catch (e) {
+        console.warn('[TransportMap] MapLibre flyTo error:', e);
+      }
+    }
+  };
+
+  // Switch active geographic location preset
+  const handleSelectLocationPreset = (preset: LocationPreset) => {
+    setCurrentLocation(preset);
+    setIsLocationMenuOpen(false);
+    flyToCoordinates(preset.lat, preset.lng, preset.zoom);
+
+    if (onLocationChange) {
+      onLocationChange(preset);
+    }
+
+    const bbox: [number, number, number, number] = [
+      roundCoord(preset.lng - 0.25),
+      roundCoord(preset.lat - 0.25),
+      roundCoord(preset.lng + 0.25),
+      roundCoord(preset.lat + 0.25),
+    ];
+    fetchTrafficForBbox(bbox, { lat: preset.lat, lng: preset.lng });
+  };
+
+  // Trigger manual refresh for current viewport
+  const handleManualRefresh = () => {
+    let bbox: [number, number, number, number] | null = null;
+    let center = { lat: currentLocation.lat, lng: currentLocation.lng };
+
+    if (basemap === 'mappls' && mapplsMapRef.current) {
+      try {
+        const b = mapplsMapRef.current.getBounds();
+        const c = mapplsMapRef.current.getCenter();
+        if (c) center = { lat: c.lat || c[1], lng: c.lng || c[0] };
+        if (b) {
+          bbox = [
+            roundCoord(b.getWest ? b.getWest() : b[0][0]),
+            roundCoord(b.getSouth ? b.getSouth() : b[0][1]),
+            roundCoord(b.getEast ? b.getEast() : b[1][0]),
+            roundCoord(b.getNorth ? b.getNorth() : b[1][1]),
+          ];
+        }
+      } catch (e) {}
+    } else if (mapRef.current) {
+      try {
+        const b = mapRef.current.getBounds();
+        const c = mapRef.current.getCenter();
+        center = { lat: c.lat, lng: c.lng };
+        bbox = [
+          roundCoord(b.getWest()),
+          roundCoord(b.getSouth()),
+          roundCoord(b.getEast()),
+          roundCoord(b.getNorth()),
+        ];
+      } catch (e) {}
+    }
+
+    if (!bbox) {
+      bbox = [
+        roundCoord(center.lng - 0.25),
+        roundCoord(center.lat - 0.25),
+        roundCoord(center.lng + 0.25),
+        roundCoord(center.lat + 0.25),
+      ];
+    }
+
+    fetchTrafficForBbox(bbox, center);
+  };
+
+  // Initialize MapLibre GL map (for non-Mappls basemaps)
   useEffect(() => {
+    if (basemap === 'mappls') {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+      return;
+    }
+
     if (!mapContainerRef.current) return;
 
     if (mapRef.current) {
@@ -307,17 +524,18 @@ export const TransportMap: React.FC<TransportMapProps> = ({
 
     try {
       const initialStyle = getStyleForProvider(basemap);
+      const startCenter: [number, number] = initialCenter || [currentLocation.lng, currentLocation.lat];
+      const startZoom = initialZoom || currentLocation.zoom || DEFAULT_ZOOM;
 
       const map = new maplibregl.Map({
         container: mapContainerRef.current,
         style: initialStyle,
-        center: DEFAULT_CENTER,
-        zoom: DEFAULT_ZOOM,
+        center: startCenter,
+        zoom: startZoom,
         pitch: 25,
         attributionControl: false,
       });
 
-      // Navigation controls
       map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'bottom-right');
 
       map.on('load', () => {
@@ -332,11 +550,35 @@ export const TransportMap: React.FC<TransportMapProps> = ({
         }
       });
 
+      // Track cursor coordinates
       map.on('mousemove', (e: any) => {
         setCursorCoords({
           lat: parseFloat(e.lngLat.lat.toFixed(4)),
           lng: parseFloat(e.lngLat.lng.toFixed(4)),
         });
+      });
+
+      // Viewport movement handler for live traffic updates
+      map.on('moveend', () => {
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = setTimeout(() => {
+          try {
+            const b = map.getBounds();
+            const c = map.getCenter();
+            const bbox: [number, number, number, number] = [
+              roundCoord(b.getWest()),
+              roundCoord(b.getSouth()),
+              roundCoord(b.getEast()),
+              roundCoord(b.getNorth()),
+            ];
+            fetchTrafficForBbox(bbox, { lat: c.lat, lng: c.lng });
+            if (onViewportChange) {
+              onViewportChange({ center: [c.lng, c.lat], bbox, zoom: map.getZoom() });
+            }
+          } catch (err) {
+            console.warn('[TransportMap] Error on moveend viewport update:', err);
+          }
+        }, 600);
       });
 
       map.on('error', (e: any) => {
@@ -366,8 +608,11 @@ export const TransportMap: React.FC<TransportMapProps> = ({
       return () => {
         window.removeEventListener('resize', handleWindowResize);
         resizeObserver.disconnect();
+        if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
         markersRef.current.forEach((m) => m.remove());
         markersRef.current = [];
+        tomtomMarkersRef.current.forEach((m) => m.remove());
+        tomtomMarkersRef.current = [];
         if (searchMarkerRef.current) {
           searchMarkerRef.current.remove();
           searchMarkerRef.current = null;
@@ -381,8 +626,153 @@ export const TransportMap: React.FC<TransportMapProps> = ({
     }
   }, [basemap, getStyleForProvider]);
 
-  // Synchronize incident markers
+  // Initialize official Mappls Web Maps SDK v3.0 (when basemap === 'mappls')
   useEffect(() => {
+    if (basemap !== 'mappls') {
+      if (mapplsMapRef.current) {
+        try {
+          if (typeof mapplsMapRef.current.remove === 'function') {
+            mapplsMapRef.current.remove();
+          }
+        } catch (e) {
+          console.warn('[TransportMap] Error removing Mappls map instance:', e);
+        }
+        mapplsMapRef.current = null;
+      }
+      return;
+    }
+
+    if (!mapplsContainerRef.current) return;
+
+    if (!mapplsStaticKey) {
+      setMapplsError(
+        'VITE_MAPPLS_STATIC_KEY is not configured in frontend/.env. Fallback to Esri Canvas is recommended.'
+      );
+      return;
+    }
+
+    let isMounted = true;
+    setIsMapplsLoading(true);
+    setMapplsError(null);
+
+    const targetCenterLat = initialCenter ? initialCenter[1] : currentLocation.lat;
+    const targetCenterLng = initialCenter ? initialCenter[0] : currentLocation.lng;
+    const targetZoom = initialZoom || currentLocation.zoom || DEFAULT_ZOOM;
+
+    loadMapplsSdk(mapplsStaticKey)
+      .then((mapplsSdk) => {
+        if (!isMounted) return;
+
+        if (mapplsContainerRef.current) {
+          mapplsContainerRef.current.innerHTML = '';
+        }
+
+        try {
+          const map = new mapplsSdk.Map(mapplsContainerRef.current, {
+            center: [targetCenterLat, targetCenterLng],
+            zoom: targetZoom,
+            traffic: showTomTomTraffic,
+          });
+
+          map.on('load', () => {
+            if (!isMounted) return;
+            setIsMapplsLoading(false);
+            setIsStyleLoaded(true);
+            setMapplsError(null);
+          });
+
+          map.addListener('mousemove', (e: any) => {
+            if (e && e.lngLat) {
+              setCursorCoords({
+                lat: parseFloat(e.lngLat.lat.toFixed(4)),
+                lng: parseFloat(e.lngLat.lng.toFixed(4)),
+              });
+            }
+          });
+
+          // Viewport movement handler for Mappls
+          map.addListener('dragend', () => {
+            if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = setTimeout(() => {
+              try {
+                const b = map.getBounds();
+                const c = map.getCenter();
+                if (b && c) {
+                  const bbox: [number, number, number, number] = [
+                    roundCoord(b.getWest ? b.getWest() : b[0][0]),
+                    roundCoord(b.getSouth ? b.getSouth() : b[0][1]),
+                    roundCoord(b.getEast ? b.getEast() : b[1][0]),
+                    roundCoord(b.getNorth ? b.getNorth() : b[1][1]),
+                  ];
+                  fetchTrafficForBbox(bbox, { lat: c.lat || c[1], lng: c.lng || c[0] });
+                  if (onViewportChange) {
+                    onViewportChange({
+                      center: [c.lng || c[0], c.lat || c[1]],
+                      bbox,
+                      zoom: typeof map.getZoom === 'function' ? map.getZoom() : 12,
+                    });
+                  }
+                }
+              } catch (e) {}
+            }, 600);
+          });
+
+          map.on('error', (e: any) => {
+            console.warn('[TransportMap] Mappls map error event:', e);
+            if (isMounted) {
+              setMapplsError(
+                'Mappls Map encountered a tile loading or domain restriction. Esri Canvas fallback is ready.'
+              );
+            }
+          });
+
+          mapplsMapRef.current = map;
+        } catch (initErr: any) {
+          console.error('[TransportMap] Failed to initialize mappls.Map:', initErr);
+          if (isMounted) {
+            setMapplsError(initErr.message || 'Failed to instantiate Mappls Web Maps SDK map.');
+            setIsMapplsLoading(false);
+          }
+        }
+      })
+      .catch((sdkErr: any) => {
+        console.error('[TransportMap] Failed to load Mappls SDK:', sdkErr);
+        if (isMounted) {
+          setMapplsError(
+            sdkErr.message || 'Failed to load official Mappls Web Maps SDK v3.0 script from sdk.mappls.com.'
+          );
+          setIsMapplsLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      mapplsMarkersRef.current.forEach((m) => {
+        try {
+          if (typeof m.remove === 'function') m.remove();
+        } catch (e) {}
+      });
+      mapplsMarkersRef.current = [];
+      mapplsTomTomMarkersRef.current.forEach((m) => {
+        try {
+          if (typeof m.remove === 'function') m.remove();
+        } catch (e) {}
+      });
+      mapplsTomTomMarkersRef.current = [];
+      if (mapplsMapRef.current) {
+        try {
+          if (typeof mapplsMapRef.current.remove === 'function') {
+            mapplsMapRef.current.remove();
+          }
+        } catch (e) {}
+        mapplsMapRef.current = null;
+      }
+    };
+  }, [basemap, mapplsStaticKey, showTomTomTraffic]);
+
+  // Synchronize MapLibre incident markers (for non-Mappls basemaps)
+  useEffect(() => {
+    if (basemap === 'mappls') return;
     const map = mapRef.current;
     if (!map) return;
 
@@ -395,7 +785,6 @@ export const TransportMap: React.FC<TransportMapProps> = ({
 
     filteredIncidents.forEach((incident) => {
       const isSelected = selectedIncident?.id === incident.id;
-
       const el = document.createElement('div');
       el.className = 'group cursor-pointer relative';
 
@@ -434,11 +823,11 @@ export const TransportMap: React.FC<TransportMapProps> = ({
       el.innerHTML = `
         <div class="relative flex items-center justify-center">
           <div class="w-7 h-7 rounded-full ${cfg.bg} ${cfg.border} ${cfg.glow} ${cfg.text} flex items-center justify-center font-bold text-[10px] shadow-lg transition-transform hover:scale-125 ${
-            isSelected ? 'scale-125 ring-8 ring-sky-400' : ''
-          }">
+        isSelected ? 'scale-125 ring-8 ring-sky-400' : ''
+      }">
             !
           </div>
-          <div class="absolute -top-7 hidden group-hover:flex items-center rounded bg-slate-900/95 text-white text-[10px] px-2 py-0.5 border border-slate-700 whitespace-nowrap shadow-md pointer-events-none z-30">
+          <div class="absolute -top-7 hidden group-hover:flex items-center rounded bg-slate-900/95 text-white text-[10px] px-2 py-0.5 border border-slate-700 whitespace-nowrap shadow-md pointer-events-none z-30 font-sans">
             ${incident.location_name}
           </div>
         </div>
@@ -464,17 +853,333 @@ export const TransportMap: React.FC<TransportMapProps> = ({
         console.warn('[TransportMap] Error adding marker:', err);
       }
     });
-  }, [filteredIncidents, selectedIncident, onSelectIncident, isStyleLoaded]);
+  }, [basemap, filteredIncidents, selectedIncident, onSelectIncident, isStyleLoaded]);
+
+  // Synchronize Mappls incident markers (when basemap === 'mappls')
+  useEffect(() => {
+    if (basemap !== 'mappls') return;
+    const map = mapplsMapRef.current;
+    if (!map || !(window as any).mappls) return;
+
+    mapplsMarkersRef.current.forEach((m) => {
+      try {
+        if (typeof m.remove === 'function') m.remove();
+      } catch (e) {}
+    });
+    mapplsMarkersRef.current = [];
+
+    filteredIncidents.forEach((incident) => {
+      const isSelected = selectedIncident?.id === incident.id;
+      const el = document.createElement('div');
+      el.className = 'group cursor-pointer relative';
+
+      const colorMap: Record<
+        IncidentSeverity,
+        { bg: string; border: string; glow: string; text: string }
+      > = {
+        CRITICAL: {
+          bg: 'bg-red-600',
+          border: 'border-red-300 ring-4 ring-red-600/40',
+          glow: 'animate-radar-critical',
+          text: 'text-white',
+        },
+        HIGH: {
+          bg: 'bg-orange-500',
+          border: 'border-orange-200 ring-2 ring-orange-500/30',
+          glow: '',
+          text: 'text-white',
+        },
+        MEDIUM: {
+          bg: 'bg-amber-500',
+          border: 'border-amber-200 ring-2 ring-amber-500/30',
+          glow: '',
+          text: 'text-slate-900',
+        },
+        LOW: {
+          bg: 'bg-emerald-500',
+          border: 'border-emerald-200',
+          glow: '',
+          text: 'text-white',
+        },
+      };
+
+      const cfg = colorMap[incident.severity] || colorMap.MEDIUM;
+
+      el.innerHTML = `
+        <div class="relative flex items-center justify-center">
+          <div class="w-7 h-7 rounded-full ${cfg.bg} ${cfg.border} ${cfg.glow} ${cfg.text} flex items-center justify-center font-bold text-[10px] shadow-lg transition-transform hover:scale-125 ${
+        isSelected ? 'scale-125 ring-8 ring-sky-400' : ''
+      }">
+            !
+          </div>
+          <div class="absolute -top-7 hidden group-hover:flex items-center rounded bg-slate-900/95 text-white text-[10px] px-2 py-0.5 border border-slate-700 whitespace-nowrap shadow-md pointer-events-none z-30 font-sans">
+            ${incident.location_name}
+          </div>
+        </div>
+      `;
+
+      try {
+        const marker = new (window as any).mappls.Marker({
+          map: map,
+          position: { lat: incident.latitude, lng: incident.longitude },
+          html: el.outerHTML,
+          popupHtml: `<strong>${incident.title}</strong><br/>${incident.location_name}`,
+        });
+
+        marker.addListener('click', () => {
+          onSelectIncident(incident);
+          if (typeof map.flyTo === 'function') {
+            map.flyTo({
+              center: [incident.longitude, incident.latitude],
+              zoom: 14.5,
+              speed: 1.2,
+            });
+          }
+        });
+
+        mapplsMarkersRef.current.push(marker);
+      } catch (err) {
+        console.warn('[TransportMap] Error adding Mappls marker:', err);
+      }
+    });
+
+    return () => {
+      mapplsMarkersRef.current.forEach((m) => {
+        try {
+          if (typeof m.remove === 'function') m.remove();
+        } catch (e) {}
+      });
+      mapplsMarkersRef.current = [];
+    };
+  }, [basemap, filteredIncidents, selectedIncident, onSelectIncident, isStyleLoaded]);
+
+  // Synchronize TomTom Traffic Flow Raster Layer (on MapLibre)
+  useEffect(() => {
+    if (basemap === 'mappls') return;
+    const map = mapRef.current;
+    if (!map || !isStyleLoaded) return;
+
+    const SOURCE_ID = 'tomtom-flow-source';
+    const LAYER_ID = 'tomtom-flow-layer';
+
+    if (showTomTomTraffic && tomtomStatus?.is_configured) {
+      if (!map.getSource(SOURCE_ID)) {
+        try {
+          map.addSource(SOURCE_ID, {
+            type: 'raster',
+            tiles: [api.getTomTomFlowTileUrl()],
+            tileSize: 256,
+            attribution: '© TomTom Traffic',
+            maxzoom: 22,
+          });
+
+          map.addLayer({
+            id: LAYER_ID,
+            type: 'raster',
+            source: SOURCE_ID,
+            minzoom: 0,
+            maxzoom: 22,
+            paint: {
+              'raster-opacity': 0.85,
+            },
+          });
+        } catch (err) {
+          console.warn('[TransportMap] Error adding TomTom flow layer:', err);
+        }
+      } else {
+        if (map.getLayer(LAYER_ID)) {
+          map.setLayoutProperty(LAYER_ID, 'visibility', 'visible');
+        }
+      }
+    } else {
+      if (map.getLayer(LAYER_ID)) {
+        map.setLayoutProperty(LAYER_ID, 'visibility', 'none');
+      }
+    }
+  }, [basemap, isStyleLoaded, showTomTomTraffic, tomtomStatus]);
+
+  // Synchronize TomTom Live Incident Markers (on MapLibre)
+  useEffect(() => {
+    if (basemap === 'mappls') return;
+    const map = mapRef.current;
+    if (!map || !isStyleLoaded) return;
+
+    tomtomMarkersRef.current.forEach((m) => m.remove());
+    tomtomMarkersRef.current = [];
+
+    if (!showTomTomTraffic || tomtomIncidents.length === 0) return;
+
+    tomtomIncidents.forEach((item) => {
+      const el = document.createElement('div');
+      el.className = 'group cursor-pointer relative';
+
+      const isCritical = item.magnitude_of_delay === 3;
+      const isMajor = item.magnitude_of_delay === 2;
+      const colorClass = isCritical
+        ? 'bg-rose-600 border-rose-300 ring-2 ring-rose-500/50'
+        : isMajor
+        ? 'bg-amber-500 border-amber-200 ring-2 ring-amber-500/40'
+        : 'bg-amber-600 border-amber-300 ring-1 ring-amber-400/30';
+
+      el.innerHTML = `
+        <div class="relative flex items-center justify-center">
+          <div class="w-6 h-6 rounded-full ${colorClass} text-white flex items-center justify-center font-bold text-[9px] shadow-lg transition-transform hover:scale-125 border">
+            TT
+          </div>
+          <div class="absolute -top-7 hidden group-hover:flex items-center rounded bg-slate-900/95 text-white text-[10px] px-2 py-0.5 border border-amber-500/40 whitespace-nowrap shadow-md pointer-events-none z-30 font-mono">
+            ${item.category ? item.category.toUpperCase() : 'INCIDENT'}: ${item.description || 'TomTom Live'}
+          </div>
+        </div>
+      `;
+
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const syntheticIncident: Incident = {
+          id: `tomtom-${item.id}`,
+          title: item.title || item.description || 'Live TomTom Incident',
+          description: `${item.description || 'Road incident reported by TomTom Live Traffic'}. Delay: ${
+            item.delay_seconds || 0
+          }s, Length: ${item.length_meters || 0}m. Source: TomTom Traffic Service.`,
+          category: item.category === 'ACCIDENT' ? 'ACCIDENT' : item.category === 'ROADWORK' ? 'ROADWORK' : 'CONGESTION',
+          severity: isCritical ? 'CRITICAL' : isMajor ? 'HIGH' : 'MEDIUM',
+          status: 'VERIFIED',
+          latitude: item.latitude,
+          longitude: item.longitude,
+          location_name: item.location_name || item.title || 'Live Traffic Corridor',
+          corridor: item.location_name || null,
+          speed_limit_kmh: null,
+          current_speed_kmh: null,
+          congestion_level_pct: isCritical ? 85 : isMajor ? 60 : 35,
+          affected_lanes: 1,
+          tags: ['tomtom', 'live', item.category || 'incident'],
+          is_simulated: false,
+          data_source: 'tomtom_live',
+          created_at: item.start_time || new Date().toISOString(),
+          updated_at: item.end_time || new Date().toISOString(),
+          resolved_at: null,
+        };
+        onSelectIncident(syntheticIncident);
+        map.flyTo({
+          center: [item.longitude, item.latitude],
+          zoom: 14.5,
+          speed: 1.2,
+        });
+      });
+
+      try {
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([item.longitude, item.latitude])
+          .addTo(map);
+        tomtomMarkersRef.current.push(marker);
+      } catch (err) {
+        console.warn('[TransportMap] Error adding TomTom incident marker:', err);
+      }
+    });
+
+    return () => {
+      tomtomMarkersRef.current.forEach((m) => m.remove());
+      tomtomMarkersRef.current = [];
+    };
+  }, [basemap, isStyleLoaded, showTomTomTraffic, tomtomIncidents, onSelectIncident]);
+
+  // Synchronize TomTom Live Incident markers (on Mappls)
+  useEffect(() => {
+    if (basemap !== 'mappls') return;
+    const map = mapplsMapRef.current;
+    if (!map || !(window as any).mappls) return;
+
+    mapplsTomTomMarkersRef.current.forEach((m) => {
+      try {
+        if (typeof m.remove === 'function') m.remove();
+      } catch (e) {}
+    });
+    mapplsTomTomMarkersRef.current = [];
+
+    if (!showTomTomTraffic || tomtomIncidents.length === 0) return;
+
+    tomtomIncidents.forEach((item) => {
+      const isCritical = item.magnitude_of_delay === 3;
+      const isMajor = item.magnitude_of_delay === 2;
+      const colorClass = isCritical
+        ? 'bg-rose-600 border-rose-300 ring-2 ring-rose-500/50'
+        : isMajor
+        ? 'bg-amber-500 border-amber-200 ring-2 ring-amber-500/40'
+        : 'bg-amber-600 border-amber-300 ring-1 ring-amber-400/30';
+
+      const el = document.createElement('div');
+      el.className = 'group cursor-pointer relative';
+      el.innerHTML = `
+        <div class="relative flex items-center justify-center">
+          <div class="w-6 h-6 rounded-full ${colorClass} text-white flex items-center justify-center font-bold text-[9px] shadow-lg transition-transform hover:scale-125 border">
+            TT
+          </div>
+          <div class="absolute -top-7 hidden group-hover:flex items-center rounded bg-slate-900/95 text-white text-[10px] px-2 py-0.5 border border-amber-500/40 whitespace-nowrap shadow-md pointer-events-none z-30 font-mono">
+            ${item.category ? item.category.toUpperCase() : 'INCIDENT'}: ${item.description || 'TomTom Live'}
+          </div>
+        </div>
+      `;
+
+      try {
+        const marker = new (window as any).mappls.Marker({
+          map: map,
+          position: { lat: item.latitude, lng: item.longitude },
+          html: el.outerHTML,
+          popupHtml: `<strong>TomTom Incident</strong><br/>${item.description || 'Live Traffic Alert'}`,
+        });
+
+        marker.addListener('click', () => {
+          const syntheticIncident: Incident = {
+            id: `tomtom-${item.id}`,
+            title: item.title || item.description || 'Live TomTom Incident',
+            description: `${item.description || 'Road incident reported by TomTom Live Traffic'}. Delay: ${
+              item.delay_seconds || 0
+            }s, Length: ${item.length_meters || 0}m. Source: TomTom Traffic Service.`,
+            category: item.category === 'ACCIDENT' ? 'ACCIDENT' : item.category === 'ROADWORK' ? 'ROADWORK' : 'CONGESTION',
+            severity: isCritical ? 'CRITICAL' : isMajor ? 'HIGH' : 'MEDIUM',
+            status: 'VERIFIED',
+            latitude: item.latitude,
+            longitude: item.longitude,
+            location_name: item.location_name || item.title || 'Live Traffic Corridor',
+            corridor: item.location_name || null,
+            speed_limit_kmh: null,
+            current_speed_kmh: null,
+            congestion_level_pct: isCritical ? 85 : isMajor ? 60 : 35,
+            affected_lanes: 1,
+            tags: ['tomtom', 'live', item.category || 'incident'],
+            is_simulated: false,
+            data_source: 'tomtom_live',
+            created_at: item.start_time || new Date().toISOString(),
+            updated_at: item.end_time || new Date().toISOString(),
+            resolved_at: null,
+          };
+          onSelectIncident(syntheticIncident);
+          if (typeof map.flyTo === 'function') {
+            map.flyTo({
+              center: [item.longitude, item.latitude],
+              zoom: 14.5,
+              speed: 1.2,
+            });
+          }
+        });
+
+        mapplsTomTomMarkersRef.current.push(marker);
+      } catch (err) {
+        console.warn('[TransportMap] Error adding TomTom incident marker on Mappls:', err);
+      }
+    });
+
+    return () => {
+      mapplsTomTomMarkersRef.current.forEach((m) => {
+        try {
+          if (typeof m.remove === 'function') m.remove();
+        } catch (e) {}
+      });
+      mapplsTomTomMarkersRef.current = [];
+    };
+  }, [basemap, showTomTomTraffic, tomtomIncidents, onSelectIncident]);
 
   const handleRecenter = () => {
-    if (mapRef.current) {
-      mapRef.current.flyTo({
-        center: DEFAULT_CENTER,
-        zoom: DEFAULT_ZOOM,
-        pitch: 25,
-        speed: 1.2,
-      });
-    }
+    flyToCoordinates(currentLocation.lat, currentLocation.lng, currentLocation.zoom);
   };
 
   // Mappls Geocode search handler
@@ -510,36 +1215,59 @@ export const TransportMap: React.FC<TransportMapProps> = ({
   };
 
   const handleSelectSearchResult = (result: any) => {
-    if (!mapRef.current) return;
-    const { longitude, latitude, formatted_address } = result;
+    const { longitude, latitude } = result;
 
-    if (searchMarkerRef.current) {
-      searchMarkerRef.current.remove();
+    if (basemap === 'mappls' && mapplsMapRef.current) {
+      if (typeof mapplsMapRef.current.flyTo === 'function') {
+        mapplsMapRef.current.flyTo({
+          center: [longitude, latitude],
+          zoom: 13.5,
+          speed: 1.2,
+        });
+      }
+    } else if (mapRef.current) {
+      if (searchMarkerRef.current) {
+        searchMarkerRef.current.remove();
+      }
+
+      const el = document.createElement('div');
+      el.className = 'flex items-center justify-center';
+      el.innerHTML = `
+        <div class="h-6 w-6 rounded-full bg-sky-500 border-2 border-white text-white flex items-center justify-center shadow-lg animate-bounce">
+          📍
+        </div>
+      `;
+
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat([longitude, latitude])
+        .addTo(mapRef.current);
+      searchMarkerRef.current = marker;
+
+      mapRef.current.flyTo({
+        center: [longitude, latitude],
+        zoom: 13.5,
+        speed: 1.2,
+      });
     }
 
-    const el = document.createElement('div');
-    el.className = 'flex items-center justify-center';
-    el.innerHTML = `
-      <div class="h-6 w-6 rounded-full bg-sky-500 border-2 border-white text-white flex items-center justify-center shadow-lg animate-bounce">
-        📍
-      </div>
-    `;
-
-    const marker = new maplibregl.Marker({ element: el })
-      .setLngLat([longitude, latitude])
-      .addTo(mapRef.current);
-    searchMarkerRef.current = marker;
-
-    mapRef.current.flyTo({
-      center: [longitude, latitude],
-      zoom: 13.5,
-      speed: 1.2,
-    });
+    const bbox: [number, number, number, number] = [
+      roundCoord(longitude - 0.25),
+      roundCoord(latitude - 0.25),
+      roundCoord(longitude + 0.25),
+      roundCoord(latitude + 0.25),
+    ];
+    fetchTrafficForBbox(bbox, { lat: latitude, lng: longitude });
 
     setShowSearchResults(false);
   };
 
   const basemapOptions: { id: BasemapProvider; label: string; badge: string; isKeyless: boolean }[] = [
+    {
+      id: 'mappls',
+      label: 'Mappls Enterprise Map',
+      badge: mapplsStaticKey ? 'Official SDK v3.0' : 'Key Required',
+      isKeyless: false,
+    },
     {
       id: 'light-canvas',
       label: 'Light Gray Canvas',
@@ -553,9 +1281,9 @@ export const TransportMap: React.FC<TransportMapProps> = ({
       isKeyless: true,
     },
     {
-      id: 'mappls',
-      label: 'Mappls Enterprise Map',
-      badge: mapplsStatus?.is_operational ? 'Connected' : 'Auth Required (401)',
+      id: 'carto',
+      label: 'CARTO Dark Matter',
+      badge: cartoApiKey ? 'Key Configured' : 'Key Required',
       isKeyless: false,
     },
     {
@@ -570,50 +1298,83 @@ export const TransportMap: React.FC<TransportMapProps> = ({
       badge: 'Keyless Raster',
       isKeyless: true,
     },
-    {
-      id: 'carto',
-      label: 'CARTO Dark Matter',
-      badge: cartoApiKey ? 'Key Configured' : 'Key Required',
-      isKeyless: false,
-    },
   ];
 
   return (
-    <div className="relative w-full h-[580px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#060a12] overflow-hidden shadow-xs dark:shadow-2xl transition-colors">
+    <div className="relative w-full h-[600px] rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-[#060a12] overflow-hidden shadow-xs dark:shadow-2xl transition-colors">
       {/* Top Map Action Toolbar */}
-      <div className="absolute top-4 left-4 right-4 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
+      <div className="absolute top-3 left-3 right-3 z-10 flex flex-wrap items-center justify-between gap-2 pointer-events-none">
         {/* Left Toolbar Items */}
-        <div className="flex flex-wrap items-center gap-2 pointer-events-auto">
-          {/* Severity filter pills */}
-          <div className="flex items-center rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md p-1 shadow-xs dark:shadow-lg">
-            {(['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const).map((sev) => (
-              <button
-                key={sev}
-                type="button"
-                onClick={() => setActiveSeverityFilter(sev)}
-                className={`rounded-md px-2.5 py-1 text-xs font-semibold tracking-wide transition-all ${
-                  activeSeverityFilter === sev
-                    ? 'bg-sky-600 text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
-              >
-                {sev}
-              </button>
-            ))}
+        <div className="flex flex-wrap items-center gap-1.5 pointer-events-auto">
+          {/* Quick Location Preset Selector */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setIsLocationMenuOpen(!isLocationMenuOpen);
+                setIsBasemapMenuOpen(false);
+              }}
+              className="flex items-center gap-1.5 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-3 py-1.5 text-xs font-bold text-sky-700 dark:text-sky-300 hover:border-sky-400 transition-colors shadow-sm"
+              title="Select City or Geographic Area"
+            >
+              <MapPin className="h-3.5 w-3.5 text-sky-500 shrink-0" />
+              <span>{currentLocation.name}</span>
+              <span className="text-[10px] font-mono font-normal opacity-80">
+                ({currentLocation.state === 'Karnataka' ? 'KA' : 'TN'})
+              </span>
+              <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
+            </button>
+
+            {isLocationMenuOpen && (
+              <div className="absolute left-0 mt-1 w-72 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120] backdrop-blur-md p-1.5 shadow-2xl z-40 space-y-1">
+                <div className="px-2.5 py-1 text-[10px] font-mono uppercase text-slate-400 tracking-wider">
+                  Select Geographic Area (Tamil Nadu & Karnataka):
+                </div>
+                <div className="max-h-64 overflow-y-auto space-y-0.5 pr-1">
+                  {LOCATION_PRESETS.map((loc) => {
+                    const isSelected = currentLocation.id === loc.id;
+                    return (
+                      <button
+                        key={loc.id}
+                        type="button"
+                        onClick={() => handleSelectLocationPreset(loc)}
+                        className={`w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-xs transition-colors ${
+                          isSelected
+                            ? 'bg-sky-50 dark:bg-sky-500/15 text-sky-700 dark:text-sky-300 font-bold border border-sky-200 dark:border-sky-500/30'
+                            : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-white'
+                        }`}
+                      >
+                        <div className="text-left">
+                          <p className="leading-none flex items-center gap-1.5">
+                            <span>{loc.name}</span>
+                            <span className="text-[10px] font-mono text-slate-400">({loc.state})</span>
+                          </p>
+                          <span className="text-[10px] text-slate-400 font-sans mt-0.5 inline-block">
+                            {loc.description}
+                          </span>
+                        </div>
+                        {isSelected && <Check className="h-4 w-4 text-sky-600 dark:text-sky-400 shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Basemap Switcher Dropdown */}
           <div className="relative">
             <button
               type="button"
-              onClick={() => setIsBasemapMenuOpen(!isBasemapMenuOpen)}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-700 transition-colors shadow-xs dark:shadow-lg"
+              onClick={() => {
+                setIsBasemapMenuOpen(!isBasemapMenuOpen);
+                setIsLocationMenuOpen(false);
+              }}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors shadow-xs"
             >
-              <MapIcon className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
-              <span>
-                {basemapOptions.find((b) => b.id === basemap)?.label || 'Light Gray Canvas'}
-              </span>
-              <ChevronDown className="h-3 w-3 text-slate-400 ml-0.5" />
+              <MapIcon className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" />
+              <span>{basemapOptions.find((b) => b.id === basemap)?.label || 'Canvas'}</span>
+              <ChevronDown className="h-3 w-3 opacity-60 ml-0.5" />
             </button>
 
             {isBasemapMenuOpen && (
@@ -628,11 +1389,6 @@ export const TransportMap: React.FC<TransportMapProps> = ({
                     onClick={() => {
                       setBasemap(opt.id);
                       setIsBasemapMenuOpen(false);
-                      if (opt.id === 'mappls' && !mapplsStatus?.is_operational) {
-                        setMapplsBannerNotice(
-                          'Mappls Map: Credentials returned HTTP 401. Running securely on Esri Canvas fallback.'
-                        );
-                      }
                     }}
                     className={`w-full flex items-center justify-between rounded-lg px-2.5 py-2 text-xs transition-colors ${
                       basemap === opt.id
@@ -653,48 +1409,50 @@ export const TransportMap: React.FC<TransportMapProps> = ({
             )}
           </div>
 
-          {/* Layer Toggles */}
-          <div className="hidden sm:flex items-center rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md p-1 shadow-xs dark:shadow-lg">
+          {/* TomTom Live Traffic Toggle */}
+          {tomtomStatus?.is_configured && (
             <button
               type="button"
-              onClick={() => setShowCongestionLayer(!showCongestionLayer)}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
-                showCongestionLayer
-                  ? 'bg-slate-100 dark:bg-slate-800 text-sky-700 dark:text-sky-400 font-semibold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-300'
+              onClick={() => setShowTomTomTraffic(!showTomTomTraffic)}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-all shadow-xs backdrop-blur-md ${
+                showTomTomTraffic
+                  ? 'bg-amber-50 dark:bg-amber-950/80 text-amber-700 dark:text-amber-300 font-semibold border-amber-300 dark:border-amber-600/50'
+                  : 'bg-white/95 dark:bg-[#0b1120]/95 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-800'
               }`}
+              title="Toggle live TomTom traffic flow and incident overlay"
             >
-              <Flame className="h-3.5 w-3.5" />
-              <span>Congestion Heat</span>
+              <Zap className="h-3.5 w-3.5 text-amber-500 fill-amber-500" />
+              <span>Traffic {tomtomIncidents.length > 0 ? `(${tomtomIncidents.length})` : ''}</span>
             </button>
+          )}
 
+          {/* Manual Refresh Button */}
+          {tomtomStatus?.is_configured && (
             <button
               type="button"
-              onClick={() => setShowCorridorLayer(!showCorridorLayer)}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-all ${
-                showCorridorLayer
-                  ? 'bg-slate-100 dark:bg-slate-800 text-sky-700 dark:text-sky-400 font-semibold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-300'
-              }`}
+              onClick={handleManualRefresh}
+              disabled={isRefreshingTraffic}
+              className="flex items-center gap-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-2 py-1.5 text-xs font-mono text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors shadow-xs disabled:opacity-50"
+              title="Manually refresh traffic data for visible area"
             >
-              <Layers className="h-3.5 w-3.5" />
-              <span>Corridors</span>
+              <RotateCw className={`h-3 w-3 ${isRefreshingTraffic ? 'animate-spin text-sky-500' : ''}`} />
+              <span className="hidden md:inline">{isRefreshingTraffic ? 'Syncing...' : lastTrafficSyncTime || 'Sync'}</span>
             </button>
-          </div>
+          )}
 
-          {/* Recenter Button */}
+          {/* Recenter / Reset Button */}
           <button
             type="button"
             onClick={handleRecenter}
-            className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-2.5 py-1 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:border-slate-300 dark:hover:border-slate-700 transition-colors shadow-xs dark:shadow-lg"
-            title="Recenter Map View"
+            className="flex items-center gap-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md px-2.5 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white transition-colors shadow-xs"
+            title={`Recenter to ${currentLocation.name}`}
           >
-            <RotateCcw className="h-3.5 w-3.5" />
+            <RotateCcw className="h-3.5 w-3.5 text-slate-500" />
             <span className="hidden sm:inline">Reset</span>
           </button>
         </div>
 
-        {/* Right Toolbar: Mappls Geocode / Search Input */}
+        {/* Right Toolbar: Place Search Input */}
         <div className="relative pointer-events-auto">
           <form onSubmit={handleMapplsSearch} className="flex items-center">
             <div className="relative flex items-center">
@@ -702,8 +1460,8 @@ export const TransportMap: React.FC<TransportMapProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Mappls place / address search..."
-                className="w-48 sm:w-64 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md py-1.5 pl-8 pr-7 text-xs text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-500 shadow-xs dark:shadow-lg focus:border-sky-500"
+                placeholder="Search location (TN / Bengaluru)..."
+                className="w-44 sm:w-60 rounded-lg border border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md py-1.5 pl-8 pr-7 text-xs text-slate-800 dark:text-slate-200 placeholder-slate-400 shadow-xs focus:border-sky-500"
               />
               <Search className="absolute left-2.5 h-3.5 w-3.5 text-slate-400 pointer-events-none" />
               {searchQuery && (
@@ -723,7 +1481,6 @@ export const TransportMap: React.FC<TransportMapProps> = ({
               type="submit"
               disabled={isSearching}
               className="ml-1 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-950/60 px-2 py-1.5 text-xs font-semibold text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900/60 shadow-xs"
-              title="Search via Mappls Geocoding"
             >
               {isSearching ? '...' : 'Find'}
             </button>
@@ -731,9 +1488,9 @@ export const TransportMap: React.FC<TransportMapProps> = ({
 
           {/* Search Results Dropdown */}
           {showSearchResults && (
-            <div className="absolute right-0 mt-1 w-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120] backdrop-blur-md p-2 shadow-2xl z-30 max-h-60 overflow-y-auto">
-              <div className="flex items-center justify-between pb-1 mb-1 border-b border-slate-200 dark:border-slate-800 text-[10px] font-mono text-slate-500 dark:text-slate-400">
-                <span>Mappls Geocode Results:</span>
+            <div className="absolute right-0 mt-1 w-80 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0b1120] backdrop-blur-md p-2 shadow-2xl z-40 max-h-60 overflow-y-auto">
+              <div className="flex items-center justify-between pb-1 mb-1 border-b border-slate-200 dark:border-slate-800 text-[10px] font-mono text-slate-500">
+                <span>Location Results:</span>
                 <button
                   type="button"
                   onClick={() => setShowSearchResults(false)}
@@ -749,7 +1506,7 @@ export const TransportMap: React.FC<TransportMapProps> = ({
                   <span className="text-[11px] leading-relaxed">{searchError}</span>
                 </div>
               ) : searchResults.length === 0 ? (
-                <div className="p-2 text-xs text-slate-400 text-center">No locations returned.</div>
+                <div className="p-2 text-xs text-slate-400 text-center">No locations found.</div>
               ) : (
                 <div className="space-y-1">
                   {searchResults.map((item, idx) => (
@@ -757,9 +1514,9 @@ export const TransportMap: React.FC<TransportMapProps> = ({
                       key={idx}
                       type="button"
                       onClick={() => handleSelectSearchResult(item)}
-                      className="w-full text-left p-2 rounded-lg text-xs hover:bg-slate-800/60 text-slate-200 transition-colors"
+                      className="w-full text-left p-2 rounded-lg text-xs hover:bg-slate-100 dark:hover:bg-slate-800/60 text-slate-800 dark:text-slate-200 transition-colors"
                     >
-                      <p className="font-semibold text-white truncate">{item.formatted_address}</p>
+                      <p className="font-semibold text-slate-900 dark:text-white truncate">{item.formatted_address}</p>
                       <p className="text-[10px] text-slate-400 font-mono mt-0.5">
                         {item.latitude.toFixed(4)}, {item.longitude.toFixed(4)}
                         {item.city ? ` • ${item.city}` : ''}
@@ -773,63 +1530,73 @@ export const TransportMap: React.FC<TransportMapProps> = ({
         </div>
       </div>
 
-      {/* Primary MapLibre GL Map Canvas Container */}
-      <div ref={mapContainerRef} className="w-full h-full" />
+      {/* MapLibre GL Map Canvas Container */}
+      <div
+        ref={mapContainerRef}
+        id="maplibre-canvas-container"
+        className="w-full h-full"
+        style={{ display: basemap === 'mappls' ? 'none' : 'block' }}
+      />
 
-      {/* Mappls Banner Notice if credentials rejected or fallback active */}
-      {mapplsBannerNotice && (
-        <div className="absolute top-16 left-4 z-10 max-w-lg rounded-xl border border-amber-300 dark:border-amber-500/40 bg-white/95 dark:bg-[#0b1120]/95 backdrop-blur-md p-3 text-xs text-amber-900 dark:text-amber-200 flex items-start gap-2.5 shadow-xl transition-colors">
-          <Info className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span className="font-semibold text-slate-900 dark:text-white">Mappls Provider Status:</span>
-            <p className="mt-0.5 text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
-              {mapplsBannerNotice}
-            </p>
-            <div className="mt-2 flex items-center gap-2">
-              <span className="rounded bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-slate-700 dark:text-slate-300">
-                Fallback: Esri Canvas
-              </span>
-              <button
-                type="button"
-                onClick={() => setMapplsBannerNotice(null)}
-                className="text-[11px] text-sky-600 dark:text-sky-400 hover:underline"
-              >
-                Dismiss notice
-              </button>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => setMapplsBannerNotice(null)}
-            className="text-slate-400 hover:text-slate-700 dark:hover:text-white"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+      {/* Official Mappls Web Maps SDK v3.0 Canvas Container */}
+      <div
+        ref={mapplsContainerRef}
+        id="mappls-canvas-container"
+        className="w-full h-full"
+        style={{ display: basemap === 'mappls' ? 'block' : 'none' }}
+      />
+
+      {/* Mappls Loading State */}
+      {basemap === 'mappls' && isMapplsLoading && (
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-sm text-white">
+          <div className="h-10 w-10 animate-spin rounded-full border-4 border-sky-400 border-t-transparent mb-3" />
+          <p className="text-sm font-semibold tracking-wide">Loading Mappls Web Maps SDK v3.0...</p>
+          <span className="text-xs text-slate-400 mt-1">Exploring {currentLocation.name}, {currentLocation.state}</span>
         </div>
       )}
 
-      {/* Connection Warning Banner if tile loading failed */}
-      {tileError && (
-        <div className="absolute top-16 left-4 z-10 max-w-md rounded-lg border border-red-500/50 bg-red-950/90 backdrop-blur-md p-2.5 text-xs text-red-200 flex items-start gap-2 shadow-xl">
-          <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span>{tileError}</span>
-            <div className="mt-1 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setBasemap('dark-canvas')}
-                className="rounded bg-slate-800 px-2 py-0.5 text-[10px] font-mono text-white hover:bg-slate-700"
-              >
-                Switch to Dark Canvas
-              </button>
+      {/* Mappls Error / Fallback State */}
+      {basemap === 'mappls' && mapplsError && (
+        <div className="absolute top-16 left-4 z-20 max-w-md rounded-xl border border-red-500/50 bg-red-950/95 backdrop-blur-md p-4 text-xs text-red-200 shadow-2xl">
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-white text-sm">Mappls SDK Notice</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-red-200">{mapplsError}</p>
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setBasemap('dark-canvas')}
+                  className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700 border border-slate-700 transition-colors"
+                >
+                  Switch to Esri Dark Canvas
+                </button>
+              </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Connection Warning Banner */}
+      {trafficError && (
+        <div className="absolute bottom-12 left-4 z-10 max-w-md rounded-lg border border-amber-500/50 bg-amber-950/90 backdrop-blur-md p-2.5 text-xs text-amber-200 flex items-start gap-2 shadow-xl">
+          <AlertTriangle className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <span>{trafficError}</span>
+            <button
+              type="button"
+              onClick={() => setTrafficError(null)}
+              className="ml-2 text-sky-400 hover:underline"
+            >
+              Dismiss
+            </button>
           </div>
         </div>
       )}
 
       {/* Legal Attribution Bar */}
       <div className="absolute bottom-1 left-2 z-10 text-[10px] font-mono text-slate-400 bg-slate-950/70 px-2 py-0.5 rounded backdrop-blur-sm pointer-events-none">
-        © MapmyIndia / Mappls • © Esri, HERE, Garmin • © OpenStreetMap contributors
+        © TomTom Live Traffic • © MapmyIndia / Mappls • © Esri, HERE, Garmin • © OpenStreetMap contributors
       </div>
 
       {/* Coordinates readout bar in footer */}
@@ -837,7 +1604,8 @@ export const TransportMap: React.FC<TransportMapProps> = ({
         <div className="absolute bottom-4 right-16 z-10 hidden sm:flex items-center gap-2 rounded-md border border-slate-800 bg-[#080d1a]/90 backdrop-blur-md px-2.5 py-1 text-[11px] font-mono text-slate-400">
           <Compass className="h-3 w-3 text-sky-400" />
           <span>
-            {cursorCoords.lat}° N, {Math.abs(cursorCoords.lng)}° W
+            {cursorCoords.lat >= 0 ? `${cursorCoords.lat}° N` : `${Math.abs(cursorCoords.lat)}° S`},{' '}
+            {cursorCoords.lng >= 0 ? `${cursorCoords.lng}° E` : `${Math.abs(cursorCoords.lng)}° W`}
           </span>
         </div>
       )}
@@ -854,3 +1622,7 @@ export const TransportMap: React.FC<TransportMapProps> = ({
     </div>
   );
 };
+
+function roundCoord(val: number): number {
+  return parseFloat(val.toFixed(4));
+}
