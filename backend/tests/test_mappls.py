@@ -30,6 +30,38 @@ def test_mappls_geocode_endpoint(client):
     assert "results" in data
 
 
+def test_mappls_kundalahalli_search_real_results(client):
+    """Verify Kundalahalli location search returns authentic results with valid coordinates."""
+    response = client.get("/api/mappls/geocode?query=Kundalahalli")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("provider") == "mappls"
+    assert data.get("success") is True
+    assert "results" in data
+    results = data["results"]
+    assert len(results) > 0, "Expected at least 1 result for Kundalahalli"
+    
+    first = results[0]
+    assert "formatted_address" in first
+    assert "latitude" in first
+    assert "longitude" in first
+    assert first["latitude"] != 0.0
+    assert first["longitude"] != 0.0
+    # Latitude for Kundalahalli (Bengaluru) should be ~12.9
+    assert 12.0 <= first["latitude"] <= 13.5
+    # Longitude for Kundalahalli (Bengaluru) should be ~77.7
+    assert 77.0 <= first["longitude"] <= 78.5
+
+
+def test_mappls_search_alias(client):
+    """Verify /api/mappls/search alias endpoint works identically."""
+    response = client.get("/api/mappls/search?query=Kundalahalli")
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("success") is True
+    assert len(data.get("results", [])) > 0
+
+
 def test_mappls_route_endpoint(client):
     """Test Mappls routing endpoint handles coordinate requests."""
     payload = {

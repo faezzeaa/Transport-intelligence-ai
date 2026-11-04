@@ -348,10 +348,13 @@ export interface MapplsGeocodeItem {
   formatted_address: string;
   latitude: number;
   longitude: number;
+  place_name?: string;
   place_id?: string;
+  eloc?: string;
   city?: string;
   state?: string;
   pincode?: string;
+  type?: string;
 }
 
 export interface MapplsGeocodeResponse {

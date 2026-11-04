@@ -27,10 +27,11 @@ def get_mappls_status():
 
 
 @router.get("/geocode")
+@router.get("/search")
 def geocode_location(query: str = Query(..., min_length=2, description="Place or address query")):
     """
-    Geocodes an address or place using Mappls Geocode API.
-    If credentials are invalid or unavailable, returns structured error with fallback guidance.
+    Geocodes an address or place using Mappls Geocode & Place Search APIs.
+    Seamlessly routes through Mappls OAuth2 or Mappls REST API Key.
     """
     service = get_mappls_service()
     result = service.geocode(query)

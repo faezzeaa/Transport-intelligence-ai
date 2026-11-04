@@ -1516,10 +1516,9 @@ export const TransportMap: React.FC<TransportMapProps> = ({
                       onClick={() => handleSelectSearchResult(item)}
                       className="w-full text-left p-2 rounded-lg text-xs hover:bg-slate-100 dark:hover:bg-slate-800/60 text-slate-800 dark:text-slate-200 transition-colors"
                     >
-                      <p className="font-semibold text-slate-900 dark:text-white truncate">{item.formatted_address}</p>
-                      <p className="text-[10px] text-slate-400 font-mono mt-0.5">
-                        {item.latitude.toFixed(4)}, {item.longitude.toFixed(4)}
-                        {item.city ? ` • ${item.city}` : ''}
+                      <p className="font-semibold text-slate-900 dark:text-white truncate">{item.place_name || item.formatted_address}</p>
+                      <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">
+                        {item.place_id ? `eLoc: ${item.place_id} • ` : ''}{item.formatted_address}
                       </p>
                     </button>
                   ))}
